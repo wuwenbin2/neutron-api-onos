@@ -1,0 +1,14 @@
+options:
+  overlay-network-type:
+    default: vxlan
+    type: string
+    description: |
+      Overlay network types to use, valid options include:
+      .
+        vxlan
+      .
+      Multiple types can be provided - field is space delimited.
+  security-groups:
+    default: false
+    type: boolean
+    description: Enable ONOS managed security groups.

@@ -30,6 +30,8 @@ import random
 import string
 import subprocess
 import hashlib
+import functools
+import itertools
 from contextlib import contextmanager
 from collections import OrderedDict
 
@@ -126,23 +128,31 @@ def service(action, service_name):
     return subprocess.call(cmd) == 0
 
 
+_UPSTART_CONF = "/etc/init/{}.conf"
+_INIT_D_CONF = "/etc/init.d/{}"
+
+
 def service_running(service_name):
     """Determine whether a system service is running"""
     if init_is_systemd():
         return service('is-active', service_name)
     else:
-        try:
-            output = subprocess.check_output(
-                ['service', service_name, 'status'],
-                stderr=subprocess.STDOUT).decode('UTF-8')
-        except subprocess.CalledProcessError:
-            return False
-        else:
-            if ("start/running" in output or "is running" in output or
-                    "up and running" in output):
-                return True
-            else:
+        if os.path.exists(_UPSTART_CONF.format(service_name)):
+            try:
+                output = subprocess.check_output(
+                    ['status', service_name],
+                    stderr=subprocess.STDOUT).decode('UTF-8')
+            except subprocess.CalledProcessError:
                 return False
+            else:
+                # This works for upstart scripts where the 'service' command
+                # returns a consistent string to represent running 'start/running'
+                if "start/running" in output:
+                    return True
+        elif os.path.exists(_INIT_D_CONF.format(service_name)):
+            # Check System V scripts init script return codes
+            return service('status', service_name)
+        return False
 
 
 def service_available(service_name):
@@ -410,7 +420,7 @@ class ChecksumError(ValueError):
     pass
 
 
-def restart_on_change(restart_map, stopstart=False):
+def restart_on_change(restart_map, stopstart=False, restart_functions=None):
     """Restart services based on configuration files changing
 
     This function is used a decorator, for example::
@@ -428,25 +438,56 @@ def restart_on_change(restart_map, stopstart=False):
     restarted if any file matching the pattern got changed, created
     or removed. Standard wildcards are supported, see documentation
     for the 'glob' module for more information.
+
+    @param restart_map: {path_file_name: [service_name, ...]
+    @param stopstart: DEFAULT false; whether to stop, start OR restart
+    @param restart_functions: nonstandard functions to use to restart services
+                              {svc: func, ...}
+    @returns result from decorated function
     """
     def wrap(f):
+        @functools.wraps(f)
         def wrapped_f(*args, **kwargs):
-            checksums = {path: path_hash(path) for path in restart_map}
-            f(*args, **kwargs)
-            restarts = []
-            for path in restart_map:
-                if path_hash(path) != checksums[path]:
-                    restarts += restart_map[path]
-            services_list = list(OrderedDict.fromkeys(restarts))
-            if not stopstart:
-                for service_name in services_list:
-                    service('restart', service_name)
-            else:
-                for action in ['stop', 'start']:
-                    for service_name in services_list:
-                        service(action, service_name)
+            return restart_on_change_helper(
+                (lambda: f(*args, **kwargs)), restart_map, stopstart,
+                restart_functions)
         return wrapped_f
     return wrap
+
+
+def restart_on_change_helper(lambda_f, restart_map, stopstart=False,
+                             restart_functions=None):
+    """Helper function to perform the restart_on_change function.
+
+    This is provided for decorators to restart services if files described
+    in the restart_map have changed after an invocation of lambda_f().
+
+    @param lambda_f: function to call.
+    @param restart_map: {file: [service, ...]}
+    @param stopstart: whether to stop, start or restart a service
+    @param restart_functions: nonstandard functions to use to restart services
+                              {svc: func, ...}
+    @returns result of lambda_f()
+    """
+    if restart_functions is None:
+        restart_functions = {}
+    checksums = {path: path_hash(path) for path in restart_map}
+    r = lambda_f()
+    # create a list of lists of the services to restart
+    restarts = [restart_map[path]
+                for path in restart_map
+                if path_hash(path) != checksums[path]]
+    # create a flat list of ordered services without duplicates from lists
+    services_list = list(OrderedDict.fromkeys(itertools.chain(*restarts)))
+    if services_list:
+        actions = ('stop', 'start') if stopstart else ('restart',)
+        for service_name in services_list:
+            if service_name in restart_functions:
+                restart_functions[service_name](service_name)
+            else:
+                for action in actions:
+                    service(action, service_name)
+    return r
 
 
 def lsb_release():

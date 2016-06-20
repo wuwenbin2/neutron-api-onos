@@ -25,7 +25,6 @@ def install_packages(servicename):
     pkgs = ['neutron-common', 'neutron-plugin-ml2']
     pkgs = filter_installed_packages(pkgs)
     apt_install(pkgs, fatal=True)
-    update_config("")
 
 def update_config(servicename):
     check_call("sudo neutron-db-manage --config-file /etc/neutron/neutron.conf --config-file /etc/neutron/plugins/ml2/ml2_conf.ini upgrade head",shell=True)
